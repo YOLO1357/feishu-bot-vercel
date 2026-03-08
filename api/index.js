@@ -1,284 +1,184 @@
-/**
- * 飞书机器人回调处理 - Vercel 部署版本
- * 处理卡片交互事件，回复用户消息
- */
+const { createHmac } = require('crypto');
 
-module.exports = async (req, res) => {
-  // 只处理 POST 请求
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+// 验证飞书请求的 Token
+function verifyFeishuRequest(timestamp, signature, secret) {
+  const hmac = createHmac('sha256', secret);
+  const sign = hmac.update(`${timestamp}\n${secret}`).digest('base64');
+  return sign === signature;
+}
+
+export default async function handler(req, res) {
+  // 处理预检请求
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
   }
 
   try {
-    const body = req.body;
-    
-    // ============================================
-    // 1. URL 验证挑战响应 (首次配置时需要)
-    // ============================================
-    if (body.challenge) {
-      console.log('收到 URL 验证请求，返回 challenge:', body.challenge);
-      return res.status(200).json({ challenge: body.challenge });
+    const { header, event } = req.body;
+
+    // URL 验证处理
+    if (req.body.challenge) {
+      console.log('收到 URL 验证请求');
+      return res.status(200).json({ challenge: req.body.challenge });
     }
 
-    // ============================================
-    // 2. 处理事件回调
-    // ============================================
-    const { header, event } = body;
-    
+    // 检查必要字段
     if (!header || !header.event_type) {
-      console.log('无效的请求格式:', JSON.stringify(body));
       return res.status(200).json({ code: 0, msg: 'ok' });
     }
 
-    const eventType = header.event_type;
-    console.log(`收到事件类型：${eventType}`);
+    console.log(`收到事件: ${header.event_type}`);
 
-    // ============================================
-    // 3. 处理卡片交互事件
-    // ============================================
-    if (eventType === 'im:card:interactive' || eventType === 'card.action') {
-      return await handleCardInteractive(event, res);
+    // 处理卡片交互事件
+    if (header.event_type === 'im:card:interactive' || 
+        header.event_type === 'card.action') {
+      await handleCardInteraction(req, res);
+      return;
     }
 
-    // ============================================
-    // 4. 处理其他事件（可选）
-    // ============================================
-    if (eventType === 'im:message.receive_at_bot' || 
-        eventType === 'im:message.p2p_msg') {
-      return await handleMessageReceive(event, res);
-    }
-
-    // 默认响应
-    return res.status(200).json({ code: 0, msg: 'ok' });
+    // 处理其他事件
+    res.status(200).json({ code: 0, msg: 'ok' });
 
   } catch (error) {
-    console.error('处理回调出错:', error);
-    return res.status(500).json({ 
-      code: 500, 
-      msg: 'Internal server error',
-      error: error.message 
-    });
+    console.error('处理请求出错:', error);
+    res.status(500).json({ code: 500, msg: 'server error' });
   }
-};
+}
 
-/**
- * 处理卡片交互事件
- */
-async function handleCardInteractive(event, res) {
+async function handleCardInteraction(req, res) {
+  const { header, event } = req.body;
   const { action, user, message } = event;
   
-  console.log('卡片交互详情:', {
-    action: action?.tag || action?.value,
-    user: user?.open_id,
-    message: message?.message_id
+  console.log('卡片交互:', {
+    actionValue: action?.value || 'unknown',
+    userId: user?.open_id
   });
 
-  // 获取用户点击的动作值
+  // 获取操作值和用户ID
   const actionValue = action?.value || action?.tag || 'unknown';
   const userId = user?.open_id || user?.user_id;
 
-  // ============================================
-  // 根据按钮动作回复不同内容
-  // ============================================
-  let replyContent = '';
+  // 创建回复内容
+  const replyContent = createReply(actionValue, userId);
 
-  switch (actionValue) {
-    case 'order_inquiry':
-    case '订单询价':
-      replyContent = createOrderInquiryCard(userId);
-      break;
-    
-    case 'warehouse_address':
-    case '海外仓地址':
-      replyContent = createWarehouseAddressCard();
-      break;
-    
-    case 'logistics_issue':
-    case '物流问题':
-      replyContent = createLogisticsIssueCard();
-      break;
-    
-    default:
-      replyContent = createDefaultReply(actionValue);
-  }
-
-  // ============================================
-  // 返回飞书要求的响应格式（包含回复消息）
-  // ============================================
-  return res.status(200).json({
+  // 飞书卡片交互响应格式
+  const response = {
     code: 0,
     msg: 'success',
     data: {
       response_type: 'reply',
       reply: replyContent
     }
-  });
+  };
+
+  console.log('发送回复:', response);
+  res.status(200).json(response);
 }
 
-/**
- * 处理消息接收事件
- */
-async function handleMessageReceive(event, res) {
-  console.log('收到消息事件');
-  
-  // 简单响应，表示已收到
-  return res.status(200).json({
-    code: 0,
-    msg: 'ok'
-  });
-}
-
-// ============================================
-// 回复卡片模板
-// ============================================
-
-/**
- * 订单询价回复卡片
- */
-function createOrderInquiryCard(userId) {
-  return {
-    type: 'interactive',
-    config: {
-      wide_screen_mode: true
-    },
-    elements: [
-      {
-        tag: 'markdown',
-        content: `## 📦 订单询价\n\n您好！请选择您需要的服务：\n\n**可查询内容：**\n• 运费估算\n• 时效查询\n• 库存查询\n• 出库费用`
-      },
-      {
-        tag: 'div',
-        text: {
-          type: 'plain_text',
-          content: '💡 点击下方按钮开始询价'
-        }
-      },
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
-            text: {
-              type: 'plain_text',
-              content: '🚀 运费估算'
-            },
-            type: 'primary',
-            value: {
-              action: 'freight_estimate',
-              user_id: userId
-            }
-          },
-          {
-            tag: 'button',
-            text: {
-              type: 'plain_text',
-              content: '⏱️ 时效查询'
-            },
-            type: 'default',
-            value: {
-              action: 'time_estimate',
-              user_id: userId
-            }
-          }
-        ]
-      },
-      {
-        tag: 'hr'
-      },
-      {
-        tag: 'note',
+function createReply(actionValue, userId) {
+  switch (actionValue) {
+    case '订单询价':
+    case 'order_inquiry':
+      return {
+        type: 'interactive',
+        config: {
+          wide_screen_mode: true
+        },
         elements: [
           {
-            type: 'plain_text',
-            content: '📞 如有其他问题，请联系客服'
-          }
-        ]
-      }
-    ]
-  };
-}
-
-/**
- * 海外仓地址回复卡片
- */
-function createWarehouseAddressCard() {
-  return {
-    type: 'interactive',
-    config: {
-      wide_screen_mode: true
-    },
-    elements: [
-      {
-        tag: 'markdown',
-        content: `## 🏭 海外仓地址\n\n**美国仓**\n📍 洛杉矶仓：1234 Warehouse Blvd, Los Angeles, CA 90001\n📍 纽约仓：5678 Storage Ave, New York, NY 10001\n\n**欧洲仓**\n📍 德国仓：Warehouse Str. 1, 20095 Hamburg\n📍 英国仓：Unit 5, London Industrial Park`
-      },
-      {
-        tag: 'div',
-        text: {
-          type: 'plain_text',
-          content: '🕐 仓库工作时间：周一至周五 9:00-18:00'
-        }
-      }
-    ]
-  };
-}
-
-/**
- * 物流问题回复卡片
- */
-function createLogisticsIssueCard() {
-  return {
-    type: 'interactive',
-    config: {
-      wide_screen_mode: true
-    },
-    elements: [
-      {
-        tag: 'markdown',
-        content: `## 🚚 物流问题反馈\n\n请选择您遇到的问题类型：`
-      },
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
+            tag: 'div',
             text: {
               type: 'plain_text',
-              content: '📦 包裹延误'
+              content: '📦 订单询价\n\n请提供您的订单信息：'
+            }
+          },
+          {
+            tag: 'input',
+            name: 'order_id',
+            placeholder: {
+              type: 'plain_text',
+              content: '请输入订单号'
             },
-            type: 'default',
-            value: { action: 'issue_delay' }
+            required: true
+          },
+          {
+            tag: 'input',
+            name: 'weight',
+            placeholder: {
+              type: 'plain_text',
+              content: '包裹重量(kg)'
+            }
           },
           {
             tag: 'button',
             text: {
               type: 'plain_text',
-              content: '🔍 物流追踪'
+              content: '🚀 提交询价'
             },
-            type: 'default',
-            value: { action: 'issue_tracking' }
+            type: 'primary',
+            value: 'submit_inquiry'
+          }
+        ]
+      };
+
+    case '海外仓地址':
+    case 'warehouse_address':
+      return {
+        type: 'interactive',
+        config: {
+          wide_screen_mode: true
+        },
+        elements: [
+          {
+            tag: 'div',
+            text: {
+              type: 'plain_text',
+              content: '🏭 海外仓地址\n\n\n美国仓：\n1234 Warehouse Blvd, Los Angeles\n\n纽约仓：\n5678 Storage Ave, New York'
+            }
+          }
+        ]
+      };
+
+    case '物流问题':
+    case 'logistics_issue':
+      return {
+        type: 'interactive',
+        config: {
+          wide_screen_mode: true
+        },
+        elements: [
+          {
+            tag: 'div',
+            text: {
+              type: 'plain_text',
+              content: '🚚 物流问题\n\n请描述您遇到的问题：'
+            }
+          },
+          {
+            tag: 'textarea',
+            name: 'issue_description',
+            placeholder: {
+              type: 'plain_text',
+              content: '详细描述问题...'
+            },
+            required: true
           },
           {
             tag: 'button',
             text: {
               type: 'plain_text',
-              content: '❌ 包裹损坏'
+              content: '📤 提交问题'
             },
-            type: 'danger',
-            value: { action: 'issue_damage' }
+            type: 'primary',
+            value: 'submit_issue'
           }
         ]
-      }
-    ]
-  };
-}
+      };
 
-/**
- * 默认回复
- */
-function createDefaultReply(actionValue) {
-  return {
-    type: 'text',
-    content: `🤖 收到您的操作：${actionValue}\n\n感谢您的使用！如有任何问题，请联系客服。`
-  };
+    default:
+      return {
+        type: 'text',
+        content: `🤖 收到您的操作：${actionValue}\n\n感谢使用！`
+      };
+  }
 }
